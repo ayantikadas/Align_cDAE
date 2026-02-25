@@ -1,20 +1,16 @@
-# AD-DAE: Unsupervised Modeling of Longitudinal Alzheimer’s Disease Progression with Diffusion Auto-Encoder
+# Align-cDAE: Attention-Aligned Conditional Diffusion Auto-encoder for Alzheimer's Disease Progression
 
 ## Architecture
-![AD-DAE Architecture](assets/Figure_architechture_diagram.png)
+![Align-cDAE Architecture](assets/Figure_architechture_diagram.png)
 
-> Figure: High-level schematic of the AD-DAE framework showing the encoder-guided diffusion decoder, latent shift estimation, and consistency guidance.
+> Figure: High-level schematic of the Align-cDAE framework.
 
 ## Inference
-- A walkthrough notebook is provided: **`Inference_AD_DAE.ipynb`**  
-- It demonstrates:
-  - Loading a trained AD-DAE checkpoint
-  - Loading a 3D .nii file and generating .h5
-  - Dataloading from .h5 files
-  - Encoding a baseline scan
-  - Estimating latent shifts from progression attributes (age, cognitive status)
-  - Generating follow-up images via the diffusion decoder
-  - Optional evaluation/visualization steps
+- Demo is provided: **`Inference_Align_cDAE.ipynb`**  
+
+## Training
+- Training script: **`training_.py`**
+
   
 ## Installations
 ### 🐳 Docker Base Image
@@ -29,14 +25,11 @@ FROM nvcr.io/nvidia/clara/monai-toolkit:2.2
 
 ## 🧠 Dataset
 
-We utilize **longitudinal brain MRI scans** from the following publicly available repositories:
+We utilize **longitudinal brain MRI scans** from the following publicly available repository:
 
 - **Alzheimer’s Disease Neuroimaging Initiative (ADNI)**  
   [https://adni.loni.usc.edu/](https://adni.loni.usc.edu/)  
   Subjects include three cognitive statuses: *Cognitively Normal (CN)*, *Mild Cognitive Impairment (MCI)*, and *Alzheimer’s Disease (AD)*.
-
-- **Open Access Series of Imaging Studies (OASIS)**  
-  [https://www.oasis-brains.org/](https://www.oasis-brains.org/)  
 
 All selected images are **T1-weighted 3D structural MRIs**.
 
