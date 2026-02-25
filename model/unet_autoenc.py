@@ -34,41 +34,41 @@ import numpy as np
 def save_hook(module, input, output):
     setattr(module, 'output', output)
 
-################ Decoding the conditioner ####################
-class Latent_decode(nn.Module):
-    def __init__(self,input_dim=50, out_dim=12, inner_dim=25,
-                 random_init=False, bias=True):
-        super(Latent_decode, self).__init__()
-        self.input_dim = input_dim 
-        self.out_dim = out_dim 
+# ################ Decoding the conditioner ####################
+# class Latent_decode(nn.Module):
+#     def __init__(self,input_dim=50, out_dim=12, inner_dim=25,
+#                  random_init=False, bias=True):
+#         super(Latent_decode, self).__init__()
+#         self.input_dim = input_dim 
+#         self.out_dim = out_dim 
 
-        self.fc1 = nn.Linear(self.input_dim, inner_dim)
-        self.bn1 = nn.BatchNorm1d(inner_dim)
-        self.act1 = nn.ELU()
+#         self.fc1 = nn.Linear(self.input_dim, inner_dim)
+#         self.bn1 = nn.BatchNorm1d(inner_dim)
+#         self.act1 = nn.ELU()
 
-        self.fc2 = nn.Linear(inner_dim, inner_dim)
-        self.bn2 = nn.BatchNorm1d(inner_dim)
-        self.act2 = nn.ELU()
+#         self.fc2 = nn.Linear(inner_dim, inner_dim)
+#         self.bn2 = nn.BatchNorm1d(inner_dim)
+#         self.act2 = nn.ELU()
 
-        self.fc3 = nn.Linear(inner_dim, inner_dim)
-        self.bn3 = nn.BatchNorm1d(inner_dim)
-        self.act3 = nn.ELU()
+#         self.fc3 = nn.Linear(inner_dim, inner_dim)
+#         self.bn3 = nn.BatchNorm1d(inner_dim)
+#         self.act3 = nn.ELU()
 
-        self.fc4 = nn.Linear(inner_dim, self.out_dim)
+#         self.fc4 = nn.Linear(inner_dim, self.out_dim)
 
-    def forward(self, input):
+#     def forward(self, input):
         
-        input = input.view([-1, self.input_dim])
+#         input = input.view([-1, self.input_dim])
         
-        x1 = self.fc1(input)
-        x = self.act1(self.bn1(x1))
-        x2 = self.fc2(x)
-        x = self.act2(self.bn2(x2 + x1))
+#         x1 = self.fc1(input)
+#         x = self.act1(self.bn1(x1))
+#         x2 = self.fc2(x)
+#         x = self.act2(self.bn2(x2 + x1))
 
-        x3 = self.fc3(x)
-        x = self.act3(self.bn3(x3 + x2 + x1))
-        out = self.fc4(x)
-        return out
+#         x3 = self.fc3(x)
+#         x = self.act3(self.bn3(x3 + x2 + x1))
+#         out = self.fc4(x)
+#         return out
 
 # ###############################
 
@@ -147,7 +147,7 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
         
         self.latent_shift_predictor = LatentDeformator(shift_dim=512, input_dim=12, out_dim=50, inner_dim=25,
                  random_init=False, bias=True)
-        self.latent_decode = Latent_decode()
+#         self.latent_decode = Latent_decode()
 #         self.image_regress = LatentShiftPredictor()
 
         self.encoder = BeatGANsEncoderConfig(
@@ -261,6 +261,7 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
 #         print("age_diff inside model forward call ",age_diff)
         self.pred_with_cond = pred_with_cond
         self.cond_shift_weight = cond_shift_weight
+        self.cond = cond
         cond_post = None
         
         if t_cond is None:
@@ -271,14 +272,14 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
             cond = self.noise_to_cond(noise)
             
 ###### 
-        if cond is None:
+        if self.cond is None:
 #             print("x shape,x_start shape", x.shape,x_start.shape)
             if x is not None:
                 assert len(x) == len(x_start), f'{len(x)} != {len(x_start)}'
             
 
             tmp = self.encode(x_start_baseline)
-            cond = tmp['cond']
+            self.cond = tmp['cond']
 #         print("After cond in model health_state", health_state,health_state.shape,health_state.dtype,health_state.device)
 #         print("After cond in model age_diff", age_diff,age_diff.shape,age_diff.dtype,age_diff.device)
         
@@ -300,9 +301,9 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
         cond_shift = self.latent_shift_predictor(_health_emb)
 #         print("After cond in model cond_shift", cond_shift,cond_shift.shape,cond_shift.dtype,cond_shift.device)
 #         print("(self.cond_shift_weight)",self.cond_shift_weight)
-        cond = cond + (self.cond_shift_weight)*cond_shift
-        if self.cond_shift_weight:
-            latent_decode_cond = self.latent_decode(cond_shift[:,0:50])
+        self.cond = self.cond + (self.cond_shift_weight)*cond_shift
+#         if self.cond_shift_weight:
+#             latent_decode_cond = self.latent_decode(cond_shift[:,0:50])
             
         
 #         print("After cond in model cond_shift_weight = self.cond_shift_weight,",self.cond_shift_weight)
@@ -320,7 +321,7 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
         if self.conf.resnet_two_cond:
             res = self.time_embed.forward(
                 time_emb=_t_emb,
-                cond=cond,
+                cond=self.cond,
                 time_cond_emb=_t_cond_emb,
                 cond_age = None,
                 cond_health = None
@@ -441,9 +442,10 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
         
 #         else:
         if self.cond_shift_weight:
-            return AutoencReturn(pred=pred, cond=cond, cond_age = cond_age,cond_health = cond_health,latent_decode_cond = latent_decode_cond)
+            return AutoencReturn(pred=pred, cond=self.cond, cond_age = cond_age,cond_health = cond_health)
+#         ,latent_decode_cond = latent_decode_cond)
         else:
-            return AutoencReturn(pred=pred, cond=cond, cond_age = cond_age,cond_health = cond_health)
+            return AutoencReturn(pred=pred, cond=self.cond, cond_age = cond_age,cond_health = cond_health)
 # -
 
 #         print("_t_emb",_t_emb.device)

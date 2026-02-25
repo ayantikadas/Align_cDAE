@@ -10,7 +10,8 @@ from choices import *
 from templates import *
 
 def AD_DAE_model_call_func(root_path='/home/projects/medimg/ayantika/Ayantika/Diff_AE_xstart_w_xbsln_disentangle_unsup/AD_DAE_files/',\
-                          checkpoint_path = '/home/projects/medimg/ayantika/Ayantika/results/AD_DAE_new_train/ADNI_AD_CN_MCI/'):
+                          checkpoint_path = '/home/projects/medimg/ayantika/Ayantika/results/AD_DAE_new_train/ADNI_AD_CN_MCI/',\
+                          epoch_no = 120):
     
     h5_data_path = root_path+'/data_store/'
     region_info_path = root_path+'/data_store/'
@@ -63,7 +64,7 @@ def AD_DAE_model_call_func(root_path='/home/projects/medimg/ayantika/Ayantika/Di
     # checkpoint_path = '/home/projects/medimg/ayantika/Ayantika/results/AD_DAE_new_train/ADNI_AD_CN_MCI/epoch=169-step=320110.ckpt'
 
 
-    epoch_no = 120
+    epoch_no = epoch_no
     checkpoint_path = glob.glob(checkpoint_path+'epoch='+str(epoch_no)+'-**')[0]
 
     device = 'cuda'

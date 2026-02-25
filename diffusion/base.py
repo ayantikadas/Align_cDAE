@@ -1,7 +1,6 @@
 """
 This code started out as a PyTorch port of Ho et al's diffusion models:
 https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/diffusion_utils_2.py
-
 Docstrings have been added, as well as DDIM sampling and a new collection of beta schedules.
 """
 
@@ -37,7 +36,62 @@ class GaussianDiffusionBeatGansConfig(BaseConfig):
     def make_sampler(self):
         return GaussianDiffusionBeatGans(self)
 
+'''
+    Function for cross attention between feature generated from text/ value based conditions 
+and the attention features from the image. 
+    The image attention features are extracted from the middle layer and the first three layers
+from the decoder of the Unet of the diffusion in a conventional setup.
+'''
 
+class Cross_Attention(nn.Module):
+    def __init__(self, d_model=512, num_heads=8, seq_len=130, cond_dim=50, dropout=0.1):
+        super(Cross_Attention, self).__init__()
+        assert d_model % num_heads == 0
+        self.d_k = d_model // num_heads
+        self.num_heads = num_heads
+        self.seq_len = seq_len
+        self.cond_dim = cond_dim
+        
+        self.query_projection = nn.Linear(d_model, d_model)
+        self.key_projection = nn.Linear(cond_dim, d_model)  # Project 50 to 512
+        self.output_projection = nn.Linear(num_heads * seq_len, cond_dim)  # [num_heads * seq_len, 50]
+        self.dropout = nn.Dropout(dropout)
+        self.scale = torch.sqrt(torch.tensor(self.d_k, dtype=torch.float))
+
+    def forward(self, queries, keys):
+        batch_size = queries.size(0)
+        
+        # Flatten spatial dimensions for queries
+        seq_len = queries.size(2) * queries.size(3)  # 10 * 13 = 130
+        queries_transpose = queries.view(batch_size, -1, seq_len).transpose(1, 2)  # [10, 130, 512]
+        
+        # Prepare keys by projecting cond [10, 50] to [10, 130, 512]
+        keys = self.key_projection(keys)  # [10, 512]
+        keys = keys.unsqueeze(1).repeat(1, seq_len, 1)  # [10, 130, 512]
+        
+        # Linear projections
+        q = self.query_projection(queries_transpose)  # [10, 130, 512]
+        k = keys  # [10, 130, 512]
+        
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # [10, 8, 130, 64]
+        k = k.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # [10, 8, 130, 64]
+        
+        # Attention scores
+        scores = torch.matmul(q, k.transpose(-1, -2)) / self.scale  # [10, 8, 130, 130]
+        attn_weights_ = torch.softmax(scores, dim=-1)  # [10, 8, 130, 130]
+        attn_weights = self.dropout(attn_weights_)
+        
+        # Aggregate across heads
+        attn_weights = attn_weights_.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)  # [10, 130, 1040]
+        
+        # Project attention weights to match cond dimension (512)
+#         print('attn_weights shape before projection:', attn_weights.shape)
+        output = self.output_projection(attn_weights)  # [10, 130, 512]
+        
+        output_img_dim = output.mean(dim=-1).view(output.shape[0],10,13)
+        
+        return output, output_img_dim
 
 class GaussianDiffusionBeatGans:
     """
@@ -125,7 +179,112 @@ class GaussianDiffusionBeatGans:
         image = (image - mean) / std
 
         return image
+    
+    ############### Function for hooking the model 
+        ######## attach hooks to layers
+    def attach_hooks(self, model, layer_names: list):
+        storage = {}
+        hooks = []
 
+        modules_to_hook = {'middle': model.middle_block}
+        for i in range(3):
+            modules_to_hook[f'out{i}'] = model.output_blocks[i]
+
+        def make_hook(layer_name: str):
+
+            def hook(module, input, output):
+    #             print('layer_name',layer_name)
+                if isinstance(input, tuple):
+                    layer_input = input[0]
+                else:
+                    layer_input = input
+                storage[layer_name] = layer_input
+
+                print('layer',layer_name,storage[layer_name].shape)
+
+            return hook
+
+        for name, mod in modules_to_hook.items():
+            hooks.append(mod.register_forward_hook(make_hook(name)))
+
+        return storage, hooks
+    
+    ######################################
+    
+    ####### Information maximization loss over the cross attention layers
+    def cross_attention_info_max_loss(self, attention_layer_weight, eps=1e-8):
+        batch_size, seq_len, cond_size = attention_layer_weight.shape
+        # L2-normalize across the feature dimension (cond_size)
+        attention_weights_normalized = attention_layer_weight / (torch.norm(attention_layer_weight, dim=-1, keepdim=True) + eps)
+        # Compute cosine similarity between all pairs i, j (i != j)
+        # Reshape to [batch_size, seq_len, 1, d_model] for broadcasting
+        a_i = attention_weights_normalized.unsqueeze(2)  # [batch_size, seq_len, 1, cond_size]
+        a_j = attention_weights_normalized.unsqueeze(1)  # [batch_size, 1, seq_len, cond_size]
+
+        # Cosine similarity: dot product of normalized vectors
+        cos_sim = torch.sum(a_i * a_j, dim=-1)  # [batch_size, seq_len, seq_len]
+
+        # Mask to exclude i == j
+        mask = torch.ones(seq_len, seq_len, device=attention_layer_weight.device) - torch.eye(seq_len, device=attention_layer_weight.device)
+        cos_sim = cos_sim * mask.unsqueeze(0)  # [batch_size, seq_len, seq_len]
+        # Compute cos^2 and average over i, j pairs (excluding i == j)
+        cos_sq = cos_sim ** 2
+        # Average over non-zero elements (i != j)
+        num_pairs = seq_len * (seq_len - 1)  # Total number of i != j pairs
+        loss = torch.sum(cos_sq) / (batch_size * num_pairs) if num_pairs > 0 else torch.tensor(0.0, device=attention_layer_weight.device)
+        return loss
+    ######################################
+    
+    ######################################
+    ## cos(target , extracted cross attention)
+    ## target -- is from the difference between followup and baseline 
+    ## extracted cross attention 
+    # Localization loss function
+    def cross_attention_alignment_loss(self, asp, target_t, eps=1e-5, alpha=0.1):
+        """
+        Compute localization loss Lloc = E[1 - cos(Asp, trg)].
+
+        Args:
+            asp (torch.Tensor): Spatial feature map A_sp, shape [batch_size, height, width]
+            target_t (torch.Tensor): Gaussian target T, shape [height, width] or [batch_size, height, width]
+            eps (float): Threshold for binary mask
+            alpha (float): Regularization weight
+
+        Returns:
+            torch.Tensor: Localization loss value.
+        """
+        batch_size, height, width = asp.shape
+
+        # Ensure target_t matches batch dimension if not provided
+        if target_t.dim() == 2:
+            target_t = target_t.unsqueeze(0).repeat(batch_size, 1, 1)  # [batch_size, height, width]
+
+        # L2-normalize Asp across spatial dimensions (flatten height and width)
+        asp_flat = asp.view(batch_size, -1)  # [batch_size, height * width]
+        asp_norm = asp_flat / (torch.norm(asp_flat, dim=-1, keepdim=True) + 1e-8)
+        asp_norm = asp_norm.view(batch_size, height, width)  # Back to [batch_size, height, width]
+
+        # Stop gradient on Asp
+        asp_sg = asp_norm.detach()
+
+        # Binary mask from target
+        binary_mask = (target_t > eps).float()
+
+        # Supervision target trg
+        trg = binary_mask * asp_sg + alpha * target_t
+
+        # L2-normalize trg across spatial dimensions
+        trg_flat = trg.view(batch_size, -1)
+        trg_norm = trg_flat / (torch.norm(trg_flat, dim=-1, keepdim=True) + 1e-8)
+        trg_norm = trg_norm.view(batch_size, height, width)
+
+        # Cosine similarity
+        cos_sim = torch.sum(asp_norm * trg_norm, dim=(1, 2)) / (height * width)  # Average over spatial dims
+        loss = 1 - cos_sim  # [batch_size]
+
+        # Average over batch
+        return loss.mean()
+    
     def training_losses(self,
                         model: Model,
                         x_start: th.Tensor,
@@ -188,43 +347,86 @@ class GaussianDiffusionBeatGans:
                 
                 else:
                     model_forward = model.forward(x=x_t.detach(),
-                                                      t=self._scale_timesteps(t),
-                                                      x_start=x_start.detach(),
-                                                      x_start_baseline = x_start_baseline.detach(),
-                                                      age_diff = age_diff.detach(),
-                                                      health_state = health_state.detach(),
-                                                      cond_shift_weight = self.cond_shift_weight,
-#                                                       pred_with_cond = model_forward.pred,
-#                                                       ventricular_mask = self.ventricle_mask_batch,
-                                                      **model_kwargs)
+                                                  t=self._scale_timesteps(t),
+                                                  x_start=x_start.detach(),
+                                                  x_start_baseline = x_start_baseline.detach(),
+                                                  age_diff = age_diff.detach(),
+                                                  health_state = health_state.detach(),
+                                                  cond_shift_weight = self.cond_shift_weight,
+                                                  **model_kwargs)
                 
             
                     model_output_shift = model_forward.pred
                     age_diff_gt = self.age_shift
-                    latent_decode_cond = model_forward.latent_decode_cond
-
+                    ############### Hooking the model ###############
+                    storage, hooks = self.attach_hooks(model.model, ['middle'] + [f'out{i}' for i in range(3)])
+                    _ = model.forward(x=x_t.detach(),
+                                                  t=self._scale_timesteps(t),
+                                                  x_start=x_start.detach(),
+                                                  x_start_baseline = x_start_baseline.detach(),
+                                                  age_diff = age_diff.detach(),
+                                                  health_state = health_state.detach(),
+                                                  cond_shift_weight = self.cond_shift_weight,
+                                                  **model_kwargs)
+                    self.save_hooks = storage
+#                     print('self.save_hooks',self.save_hooks.keys())
+                    for hook in hooks:
+                        hook.remove()
                     ###############
-                    img_ = model_output_shift
-                    img_baseline = x_start_baseline.cuda()
-#                     diff_img = self.normalize_tensor((img_ - img_baseline),0,1)
-                    img_ = self.normalize_tensor(img_,0,1)
-                    img_baseline = self.normalize_tensor(img_baseline,0,1)
-                    norm_diff = self.normalize_tensor((img_ - img_baseline),0,1)
+                    _health_emb = health_state.detach()
+                    _health_emb = _health_emb.to(torch.float32)
+                    cond_shift = model.latent_shift_predictor(_health_emb)
+                    cond_pred__ = model.cond + (model.cond_shift_weight)*cond_shift
+                    self.save_hooks.update({'cond':cond_pred__})
+#                     print('self.save_hooks after cond key',self.save_hooks.keys())
+                    ###############
+                    ############### Apply cross attention and the losses with the cross attention layers ###############
+                    list_loss_cross_attention_info_max = []
+                    list_loss_cross_attention_alignment = []
+                    for k_ in ['middle', 'out0', 'out1', 'out2']:
+                        queries = self.save_hooks[k_]
+                    #     print('queries', queries.shape)
+                        keys = self.save_hooks['cond'][:,0:50]
+                        device = queries.device
+                        CA = Cross_Attention(d_model=queries.shape[1], num_heads=8, \
+                                         seq_len=queries.shape[2]*queries.shape[3],\
+                                         cond_dim=keys.shape[1]).to(device)
+                        layer_wise_attention, layer_wise_attention_img_dim = CA.forward(queries.to(device), keys.to(device))
+                        loss_cross_attention_info_max = self.cross_attention_info_max_loss(layer_wise_attention)
+                        list_loss_cross_attention_info_max.append(loss_cross_attention_info_max)
+                        
+                        localization_mask = (x_start.to(device) - x_start_baseline.to(device))[:,:,:,:]<torch.tensor(-0.5)
+                        target_mask = F.max_pool2d(localization_mask.to(dtype=torch.float32),\
+                                                   kernel_size=16, stride=16)
+                        loss_cross_attention_alignment = self.cross_attention_alignment_loss(layer_wise_attention_img_dim, target_mask[:,0,:,:].to(device))
+                        list_loss_cross_attention_alignment.append(loss_cross_attention_alignment)
+                        
+                    #####
+                    terms["loss_cross_attention_info_max"] = torch.tensor(list_loss_cross_attention_info_max).mean()
+                    terms["loss_cross_attention_alignment"] = torch.tensor(list_loss_cross_attention_alignment).mean()
+#                     print('terms["loss_cross_attention_info_max"]',terms["loss_cross_attention_info_max"])
+#                     print('terms["loss_cross_attention_alignment"]', terms["loss_cross_attention_alignment"] )
+                        
                     
-#                     for ii in range((img_ - img_baseline).shape[0]):
-#                         if (img_ - img_baseline)[ii].sum() == 0:
-#                             norm_diff[ii] = (img_ - img_baseline)[ii]
-                    norm_diff = norm_diff * self.ventricle_mask_batch
-                    concat_img = torch.cat((img_,img_baseline,norm_diff),dim=1)
-                    concat_img_norm = self.mean_norm(concat_img)
+                    ###############
+                    
+#                     latent_decode_cond = model_forward.latent_decode_cond
 
-        #             print("concat_img.shape",concat_img.shape)
+#                     
+#                     img_ = model_output_shift
+#                     img_baseline = x_start_baseline.cuda()
+#                     img_ = self.normalize_tensor(img_,0,1)
+#                     img_baseline = self.normalize_tensor(img_baseline,0,1)
+#                     norm_diff = self.normalize_tensor((img_ - img_baseline),0,1)
+#                     norm_diff = norm_diff * self.ventricle_mask_batch
+#                     concat_img = torch.cat((img_,img_baseline,norm_diff),dim=1)
+#                     concat_img_norm = self.mean_norm(concat_img)
                  
-                    ################
-                    logits, shift_prediction  = latent_shift_predictor(concat_img_norm)
-                    age_diff_pred = shift_prediction
+#                     ################
+#                     logits, shift_prediction  = latent_shift_predictor(concat_img_norm)
+#                     age_diff_pred = shift_prediction
 
-#             target_indices
+
                     ######
 #                     model_forward_shift.pred ---- send it to resnet --- output of the resnet will be a regression value 
 #                     which would be compared to the age_diff value and add it to the loss ### 
@@ -250,7 +452,6 @@ class GaussianDiffusionBeatGans:
                 clip_denoised=False)
             terms['pred_xstart'] = p_mean_var['pred_xstart']
 
-            # model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
 
             target_types = {
                 ModelMeanType.eps: noise,
@@ -263,10 +464,10 @@ class GaussianDiffusionBeatGans:
                     # (n, c, h, w) => (n, )
                     terms["mse"] = mean_flat((target - model_output)**2)
                     
-                    if self.cond_shift_weight:
-                        terms["regress_age_diff"] = mean_flat((age_diff_gt - age_diff_pred)**2)
-                        terms["logit_loss"] = cross_entropy(logits, cond_vector)
-                        terms["latent_decode_cond"] = cross_entropy(latent_decode_cond, cond_vector)
+#                     if self.cond_shift_weight:
+#                         terms["regress_age_diff"] = mean_flat((age_diff_gt - age_diff_pred)**2)
+#                         terms["logit_loss"] = cross_entropy(logits, cond_vector)
+#                         terms["latent_decode_cond"] = cross_entropy(latent_decode_cond, cond_vector)
 
                 else:
                     raise NotImplementedError()
@@ -284,7 +485,9 @@ class GaussianDiffusionBeatGans:
             elif "latent_code_mse" in terms:
                 terms["loss"] = terms["mse"] + 0.2*terms["latent_code_mse"] + 0.2*terms["sparsity_cons"]
             elif self.cond_shift_weight:
-                terms["loss"] = terms["mse"] + 0.01*terms["regress_age_diff"] + 0.001*terms["logit_loss"] + 0.001*terms["latent_decode_cond"]
+                terms["loss"] = terms["mse"] + 0.001*terms["loss_cross_attention_info_max"] + 0.001* terms["loss_cross_attention_alignment"]
+#                 + 0.01*terms["regress_age_diff"] + 0.001*terms["logit_loss"] 
+#                 + 0.001*terms["latent_decode_cond"]
             else:
                 terms["loss"] = terms["mse"]
         else:

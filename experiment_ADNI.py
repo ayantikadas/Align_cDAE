@@ -302,7 +302,7 @@ class LitModel(pl.LightningModule):
 
 
         self.train_data = self.conf.make_dataset(path = self.conf.data_config_path,\
-                                                csv_path =self.conf.csv_path ,\
+                                                csv_path = self.conf.csv_path ,\
                                                 h5_save_path = self.conf.h5_save_path_train,\
                                                 csv_file_name = self.conf.csv_file_name_train, \
                                                 csv_mask_name = self.conf.csv_mask_name_train , \
@@ -320,8 +320,8 @@ class LitModel(pl.LightningModule):
                                                 csv_mask_name = self.conf.csv_mask_name_test , \
                                                 ventricle_mask_root_path = self.conf.ventricle_mask_root_path,\
                                                 mode_ = self.conf.mode_test)
-        self.val_data = SubsetDataset(self.val_data, size=1000)
-#         self.val_data = SubsetDataset(self.val_data, size=800)
+#         self.val_data = SubsetDataset(self.val_data, size=1000)
+        self.val_data = SubsetDataset(self.val_data, size=800)
         print('val data:', len(self.val_data))
 
     def _train_dataloader(self, drop_last=True):
@@ -536,7 +536,7 @@ class LitModel(pl.LightningModule):
                 self.sampler.ventricle_mask_batch = ventricle_mask_batch
 #                 print("(self.trainer.current_epoch",self.trainer.current_epoch)
                 self.sampler.age_shift  = shifts.to(batch[mode_+'_image'].dtype).to(batch[mode_+'_image'].device)
-                if (self.trainer.current_epoch<=10) or ((self.trainer.current_epoch%10)==0):
+                if (self.trainer.current_epoch<=50) or ((self.trainer.current_epoch%10)==0):
                     self.sampler.cond_shift_weight= 0
                     x_start = x_start_baseline
                 else:
@@ -549,6 +549,7 @@ class LitModel(pl.LightningModule):
                                                       cond_vector = cond_vector,
                                                       latent_shift_predictor = self.latent_shift_predictor,
                                                       t=t)
+#                 print('losses', losses)
 #                 "epsilon","cond_pre""cond_post" pred_xstart
             elif self.conf.train_mode.is_latent_diffusion():
                 """
@@ -569,7 +570,7 @@ class LitModel(pl.LightningModule):
             loss = losses['loss'].mean()
             # divide by accum batches to make the accumulated gradient exact!
             for key in ['loss', 'vae', 'latent', 'mmd', 'chamfer', 'arg_cnt','latent_code_mse','mse','sparsity_cons',\
-                        'regress_age_diff','logit_loss','latent_decode_cond']:
+                        'loss_cross_attention_info_max','loss_cross_attention_alignment']:
                 if key in losses:
                     losses[key] = self.all_gather(losses[key]).mean()
             
@@ -601,7 +602,7 @@ class LitModel(pl.LightningModule):
                 self.logger.experiment.add_scalar('loss', losses['loss'],
                                                   self.trainer.current_epoch)
                 for key in ['vae', 'latent', 'mmd', 'chamfer', 'arg_cnt','latent_code_mse',\
-                            'mse','sparsity_cons',"regress_age_diff",'logit_loss','latent_decode_cond']:
+                            'mse','sparsity_cons','loss_cross_attention_info_max','loss_cross_attention_alignment']:
                     if key in losses:
 #                         print("losses[key]",losses[key],key)
                         self.logger.experiment.add_scalar(
@@ -764,7 +765,7 @@ class LitModel(pl.LightningModule):
 #                             self.eval_sampler.cond_shift_weight= 0
 #                             _xstart = _xstart_baseline
 #                         else:
-                        if (self.trainer.current_epoch<=20) or ((self.trainer.current_epoch%10)==0):
+                        if (self.trainer.current_epoch<=50) or ((self.trainer.current_epoch%10)==0):
                             self.eval_sampler.cond_shift_weight= 0
                             _xstart = _xstart_baseline
                         else:
@@ -937,16 +938,16 @@ class LitModel(pl.LightningModule):
                 self.conf.batch_size_effective):
             print(f'eval fid @ {self.num_samples}')
             lpips(self.model, '')
-            fid(self.model, '')
+#             fid(self.model, '')
 
 #         if self.conf.eval_ema_every_samples > 0 and self.num_samples > 0 and is_time(
 #                 self.num_samples, self.conf.eval_ema_every_samples,
 #                 self.conf.batch_size_effective):
-        if self.conf.sample_every_samples > 0 and is_time(
-                self.num_samples, self.conf.sample_every_samples,
-                self.conf.batch_size_effective):
-            print(f'eval fid ema @ {self.num_samples}')
-            fid(self.ema_model, '_ema')
+#         if self.conf.sample_every_samples > 0 and is_time(
+#                 self.num_samples, self.conf.sample_every_samples,
+#                 self.conf.batch_size_effective):
+#             print(f'eval fid ema @ {self.num_samples}')
+#             fid(self.ema_model, '_ema')
             # it's too slow
             # lpips(self.ema_model, '_ema')
 
@@ -1219,7 +1220,7 @@ def train(conf: TrainConfig, gpus, nodes=1, mode: str = 'train'):
 #                                  every_n_train_steps = conf.save_every_samples)
 #     //
 #                                  conf.batch_size_effective)
-    checkpoint_path = f'{conf.logdir}/last-v5.ckpt'
+    checkpoint_path = f'{conf.logdir}/last.ckpt'
 #     checkpoint_path = '/storage/Ayantika/results/Diff_AE_xstart_w_xbsln_disentangle_unsup/ADNI_AD_CN_MCI/last.ckpt'
     print('ckpt path:', checkpoint_path)
     if os.path.exists(checkpoint_path):
